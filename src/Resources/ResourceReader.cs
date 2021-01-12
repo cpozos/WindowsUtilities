@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections;
 using System.Collections.Specialized;
+using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
@@ -20,8 +21,13 @@ namespace Resources
       private string _resHeaderMimeType;
       private string _resHeaderReaderType;
       private string _resHeaderWriterType;
+      private ReaderAliasResolver _aliasResolver;
 
-      public ResourceReader(string fileName) => _fileName = fileName;
+      public ResourceReader(string fileName)
+      {
+         _fileName = fileName;
+         _aliasResolver = new ReaderAliasResolver();
+      }
 
       #region Dispose and Close
 
@@ -76,6 +82,8 @@ namespace Resources
          reader.NameTable.Add(ResourceConstants.AliasStr);
       }
 
+
+      #region Parsers
       private void ParseXml(XmlTextReader reader)
       {
          bool success = false;
@@ -113,7 +121,7 @@ namespace Resources
             catch (SerializationException se)
             {
                Point pt = GetPosition(reader);
-               string newMessage = string.Format(SR.SerializationException, reader[ResourceConstants.TypeStr], pt.Y, pt.X, se.Message);
+               string newMessage = string.Format(/*SR.SerializationException*/"", reader[ResourceConstants.TypeStr], pt.Y, pt.X, se.Message);
                XmlException xml = new XmlException(newMessage, se, pt.Y, pt.X);
                SerializationException newSe = new SerializationException(newMessage, xml);
 
@@ -122,7 +130,7 @@ namespace Resources
             catch (TargetInvocationException tie)
             {
                Point pt = GetPosition(reader);
-               string newMessage = string.Format(SR.InvocationException, reader[ResourceConstants.TypeStr], pt.Y, pt.X, tie.InnerException.Message);
+               string newMessage = string.Format(/*SR.InvocationException*/"", reader[ResourceConstants.TypeStr], pt.Y, pt.X, tie.InnerException.Message);
                XmlException xml = new XmlException(newMessage, tie.InnerException, pt.Y, pt.X);
                TargetInvocationException newTie = new TargetInvocationException(newMessage, xml);
 
@@ -130,13 +138,13 @@ namespace Resources
             }
             catch (XmlException e)
             {
-               throw new ArgumentException(string.Format(SR.InvalidResXFile, e.Message), e);
+               throw new ArgumentException(string.Format(/*SR.InvalidResXFile*/"", e.Message), e);
             }
             catch (Exception e)
             {
                Point pt = GetPosition(reader);
                XmlException xmlEx = new XmlException(e.Message, e, pt.Y, pt.X);
-               throw new ArgumentException(string.Format(SR.InvalidResXFile, xmlEx.Message), xmlEx);
+               throw new ArgumentException(string.Format(/*SR.InvalidResXFile*/"", xmlEx.Message), xmlEx);
             }
          }
          finally
@@ -149,36 +157,161 @@ namespace Resources
 
          bool validFile = false;
 
-         //if (_resHeaderMimeType == ResourceConstants.ResMimeType)
-         //{
-         //   Type readerType = typeof(ResXResourceReader);
-         //   Type writerType = typeof(ResXResourceWriter);
+         if (_resHeaderMimeType == ResourceConstants.ResMimeType)
+         {
+            Type readerType = typeof(ResourceReader);
+            Type writerType = typeof(ResourceWriter);
 
-         //   string readerTypeName = _resHeaderReaderType;
-         //   string writerTypeName = _resHeaderWriterType;
-         //   if (readerTypeName !=null && readerTypeName.IndexOf(',') != -1)
-         //   {
-         //      readerTypeName = readerTypeName.Split(',')[0].Trim();
-         //   }
-         //   if (writerTypeName !=null && writerTypeName.IndexOf(',') != -1)
-         //   {
-         //      writerTypeName = writerTypeName.Split(',')[0].Trim();
-         //   }
+            string readerTypeName = _resHeaderReaderType;
+            string writerTypeName = _resHeaderWriterType;
+            if (readerTypeName != null && readerTypeName.IndexOf(',') != -1)
+            {
+               readerTypeName = readerTypeName.Split(',')[0].Trim();
+            }
+            if (writerTypeName != null && writerTypeName.IndexOf(',') != -1)
+            {
+               writerTypeName = writerTypeName.Split(',')[0].Trim();
+            }
 
-         //   if (readerTypeName !=null &&
-         //       writerTypeName !=null &&
-         //       readerTypeName.Equals(readerType.FullName) &&
-         //       writerTypeName.Equals(writerType.FullName))
-         //   {
-         //      validFile = true;
-         //   }
-         //}
+            if (readerTypeName != null &&
+                writerTypeName != null &&
+                readerTypeName.Equals(readerType.FullName) &&
+                writerTypeName.Equals(writerType.FullName))
+            {
+               validFile = true;
+            }
+         }
 
          if (!validFile)
          {
             _resData = null;
             throw new ArgumentException();
          }
+      }
+
+      private void ParseAssemblyNode(XmlReader reader)
+      {
+         string alias = reader[ResourceConstants.AliasStr];
+         string typeName = reader[ResourceConstants.NameStr];
+
+         AssemblyName assemblyName = new AssemblyName(typeName);
+
+         if (string.IsNullOrEmpty(alias))
+         {
+            alias = assemblyName.Name;
+         }
+
+         _aliasResolver.PushAlias(alias, assemblyName);
+      }
+
+      private void ParseDataNode(XmlTextReader reader, bool isMetaData)
+      {
+         var nodeInfo = new DataNodeInfo
+         {
+            Name = reader[ResourceConstants.NameStr]
+         };
+
+         string typeName = reader[ResourceConstants.TypeStr];
+
+         string alias = null;
+         AssemblyName assemblyName = null;
+
+         if (!string.IsNullOrEmpty(typeName))
+         {
+            alias = GetAliasFromTypeName(typeName);
+         }
+
+         if (!string.IsNullOrEmpty(alias))
+         {
+            assemblyName = _aliasResolver.ResolveAlias(alias);
+         }
+
+         if (assemblyName != null)
+         {
+            nodeInfo.TypeName = GetTypeFromTypeName(typeName) + ", " + assemblyName.FullName;
+         }
+         else
+         {
+            nodeInfo.TypeName = reader[ResourceConstants.TypeStr];
+         }
+
+         nodeInfo.MimeType = reader[ResourceConstants.MimeTypeStr];
+
+         bool finishedReadingDataNode = false;
+         nodeInfo.ReaderPosition = GetPosition(reader);
+         while (!finishedReadingDataNode && reader.Read())
+         {
+            if (reader.NodeType == XmlNodeType.EndElement && (reader.LocalName.Equals(ResourceConstants.DataStr) || reader.LocalName.Equals(ResourceConstants.MetadataStr)))
+            {
+               // we just found </data>, quit or </metadata>
+               finishedReadingDataNode = true;
+            }
+            else
+            {
+               // could be a <value> or a <comment>
+               if (reader.NodeType == XmlNodeType.Element)
+               {
+                  if (reader.Name.Equals(ResourceConstants.ValueStr))
+                  {
+                     WhitespaceHandling oldValue = reader.WhitespaceHandling;
+                     try
+                     {
+                        // based on the documentation at https://docs.microsoft.com/dotnet/api/system.xml.xmltextreader.whitespacehandling
+                        // this is ok because:
+                        // "Because the XmlTextReader does not have DTD information available to it,
+                        // SignificantWhitepsace nodes are only returned within the an xml:space='preserve' scope."
+                        // the xml:space would not be present for anything else than string and char (see ResXResourceWriter)
+                        // so this would not cause any breaking change while reading data from Everett (we never outputed
+                        // xml:space then) or from whidbey that is not specifically either a string or a char.
+                        // However please note that manually editing a resx file in Everett and in Whidbey because of the addition
+                        // of xml:space=preserve might have different consequences...
+                        reader.WhitespaceHandling = WhitespaceHandling.Significant;
+                        nodeInfo.ValueData = reader.ReadString();
+                     }
+                     finally
+                     {
+                        reader.WhitespaceHandling = oldValue;
+                     }
+                  }
+                  else if (reader.Name.Equals(ResourceConstants.CommentStr))
+                  {
+                     nodeInfo.Comment = reader.ReadString();
+                  }
+               }
+               else
+               {
+                  // weird, no <xxxx> tag, just the inside of <data> as text
+                  nodeInfo.ValueData = reader.Value.Trim();
+               }
+            }
+         }
+
+         if (nodeInfo.Name is null)
+         {
+            throw new ArgumentException(string.Format(/*SR.InvalidResXResourceNoName*/"", nodeInfo.ValueData));
+         }
+
+         _resData[nodeInfo.Name] = nodeInfo;
+
+         /*
+         ResXDataNode dataNode = new ResXDataNode(nodeInfo, BasePath);
+
+         if (UseResXDataNodes)
+         {
+            _resData[nodeInfo.Name] = dataNode;
+         }
+         else
+         {
+            IDictionary data = _resData;
+            if (_assemblyNames is null)
+            {
+               data[nodeInfo.Name] = dataNode.GetValue(_typeResolver);
+            }
+            else
+            {
+               data[nodeInfo.Name] = dataNode.GetValue(_assemblyNames);
+            }
+         }*/
       }
 
       private void ParseResHeaderNode(XmlReader reader)
@@ -286,136 +419,42 @@ namespace Resources
          }
       }
 
-      private void ParseAssemblyNode(XmlReader reader)
+      #endregion
+
+
+      /// <summary>
+      ///  Attempts to return the line and column (Y, X) of the XML reader.
+      /// </summary>
+      private Point GetPosition(XmlReader reader)
       {
-         string alias = reader[ResourceConstants.AliasStr];
-         string typeName = reader[ResourceConstants.NameStr];
+         Point pt = new Point(0, 0);
 
-         AssemblyName assemblyName = new AssemblyName(typeName);
-
-         if (string.IsNullOrEmpty(alias))
+         if (reader is IXmlLineInfo lineInfo)
          {
-            alias = assemblyName.Name;
+            pt.Y = lineInfo.LineNumber;
+            pt.X = lineInfo.LinePosition;
          }
 
-         _aliasResolver.PushAlias(alias, assemblyName);
+         return pt;
       }
-
-      private void ParseDataNode(XmlTextReader reader, bool isMetaData)
+      private string GetAliasFromTypeName(string typeName)
       {
-         DataNodeInfo nodeInfo = new DataNodeInfo
-         {
-            Name = reader[ResourceConstants.NameStr]
-         };
-
-         string typeName = reader[ResourceConstants.TypeStr];
-
-         string alias = null;
-         AssemblyName assemblyName = null;
-
-         if (!string.IsNullOrEmpty(typeName))
-         {
-            alias = GetAliasFromTypeName(typeName);
-         }
-
-         if (!string.IsNullOrEmpty(alias))
-         {
-            assemblyName = _aliasResolver.ResolveAlias(alias);
-         }
-
-         if (assemblyName != null)
-         {
-            nodeInfo.TypeName = GetTypeFromTypeName(typeName) + ", " + assemblyName.FullName;
-         }
-         else
-         {
-            nodeInfo.TypeName = reader[ResourceConstants.TypeStr];
-         }
-
-         nodeInfo.MimeType = reader[ResourceConstants.MimeTypeStr];
-
-         bool finishedReadingDataNode = false;
-         nodeInfo.ReaderPosition = GetPosition(reader);
-         while (!finishedReadingDataNode && reader.Read())
-         {
-            if (reader.NodeType == XmlNodeType.EndElement && (reader.LocalName.Equals(ResourceConstants.DataStr) || reader.LocalName.Equals(ResourceConstants.MetadataStr)))
-            {
-               // we just found </data>, quit or </metadata>
-               finishedReadingDataNode = true;
-            }
-            else
-            {
-               // could be a <value> or a <comment>
-               if (reader.NodeType == XmlNodeType.Element)
-               {
-                  if (reader.Name.Equals(ResourceConstants.ValueStr))
-                  {
-                     WhitespaceHandling oldValue = reader.WhitespaceHandling;
-                     try
-                     {
-                        // based on the documentation at https://docs.microsoft.com/dotnet/api/system.xml.xmltextreader.whitespacehandling
-                        // this is ok because:
-                        // "Because the XmlTextReader does not have DTD information available to it,
-                        // SignificantWhitepsace nodes are only returned within the an xml:space='preserve' scope."
-                        // the xml:space would not be present for anything else than string and char (see ResXResourceWriter)
-                        // so this would not cause any breaking change while reading data from Everett (we never outputed
-                        // xml:space then) or from whidbey that is not specifically either a string or a char.
-                        // However please note that manually editing a resx file in Everett and in Whidbey because of the addition
-                        // of xml:space=preserve might have different consequences...
-                        reader.WhitespaceHandling = WhitespaceHandling.Significant;
-                        nodeInfo.ValueData = reader.ReadString();
-                     }
-                     finally
-                     {
-                        reader.WhitespaceHandling = oldValue;
-                     }
-                  }
-                  else if (reader.Name.Equals(ResourceConstants.CommentStr))
-                  {
-                     nodeInfo.Comment = reader.ReadString();
-                  }
-               }
-               else
-               {
-                  // weird, no <xxxx> tag, just the inside of <data> as text
-                  nodeInfo.ValueData = reader.Value.Trim();
-               }
-            }
-         }
-
-         if (nodeInfo.Name is null)
-         {
-            throw new ArgumentException(string.Format(SR.InvalidResXResourceNoName, nodeInfo.ValueData));
-         }
-
-         ResXDataNode dataNode = new ResXDataNode(nodeInfo, BasePath);
-
-         if (UseResXDataNodes)
-         {
-            _resData[nodeInfo.Name] = dataNode;
-         }
-         else
-         {
-            IDictionary data = _resData;
-            if (_assemblyNames is null)
-            {
-               data[nodeInfo.Name] = dataNode.GetValue(_typeResolver);
-            }
-            else
-            {
-               data[nodeInfo.Name] = dataNode.GetValue(_assemblyNames);
-            }
-         }
+         int indexStart = typeName.IndexOf(',');
+         return typeName.Substring(indexStart + 2);
+      }
+      private string GetTypeFromTypeName(string typeName)
+      {
+         int indexStart = typeName.IndexOf(',');
+         return typeName.Substring(0, indexStart);
       }
 
 
+      IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
       public IDictionaryEnumerator GetEnumerator()
       {
          _isReaderDirty = true;
          EnsureResData();
          return _resData.GetEnumerator();
       }
-
-      IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
    }
 }
