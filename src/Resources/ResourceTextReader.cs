@@ -15,12 +15,21 @@ namespace Resources
    {
       private FileStream _stream;
       private string _fileName;
+      private bool _force;
       private Dictionary<string, string> _resData;
+      private XmlReaderSettings _readerSettings;
 
-      public ResourceTextReader(string fileName)
+      public ResourceTextReader(string fileName, XmlReaderSettings readerSettings = null)
       {
          _fileName = fileName;
          _resData = new Dictionary<string, string>();
+         _readerSettings = readerSettings ?? new XmlReaderSettings
+         {
+            Async = false,
+            CheckCharacters = true,
+            IgnoreComments = true,
+            IgnoreWhitespace = false,
+         };
       }
 
       #region Dispose and Close
@@ -55,10 +64,11 @@ namespace Resources
       {
          using (_stream = new FileStream(_fileName, FileMode.Open, FileAccess.Read, FileShare.Read))
          {
-            using (var contentReader = new XmlTextReader(_stream))
+            using (var contentReader = XmlReader.Create(_stream, _readerSettings)) 
+            //using (var contentReader = new XmlTextReader(_stream))
             {
                SetupNameTable(contentReader);
-               contentReader.WhitespaceHandling = WhitespaceHandling.None;
+               //contentReader.WhitespaceHandling = WhitespaceHandling.None;
                ParseXml(contentReader);
             }
          }
@@ -81,7 +91,7 @@ namespace Resources
          reader.NameTable.Add(ResourceConstants.AssemblyStr);
          reader.NameTable.Add(ResourceConstants.AliasStr);
       }
-      private void ParseXml(XmlTextReader reader)
+      private void ParseXml(/*XmlTextReader*/ XmlReader reader)
       {
          XDocument doc = XDocument.Load(reader);
 
